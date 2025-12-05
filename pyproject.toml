@@ -26,6 +26,7 @@ dependencies = [
     # Integrations
     "mux-python>=3.0.0",
     "zep-cloud>=2.0.0",
+    "replicate>=0.34.0",
 
     # Research
     "crawl4ai>=0.4.0",

@@ -25,7 +25,7 @@ from packages.integrations.src.research import crawl4ai_crawl, serper_search
 from packages.integrations.src.storage import save_to_neon, sync_to_zep, get_from_neon
 
 # Import workflows
-from workflows import CreateCompanyWorkflow, CreateArticleWorkflow
+from workflows import CreateCompanyWorkflow, CreateArticleWorkflow, CreateVideoWorkflow, CreateNewsWorkflow
 from activities import (
     # Company activities
     normalize_company_url,
@@ -47,6 +47,11 @@ from activities import (
     generate_four_act_article,
     save_article_to_neon,
     sync_article_to_zep,
+    get_article_by_id,
+    # News activities
+    get_recent_articles,
+    assess_news_relevance,
+    # Video activities
     generate_video_prompt,
     generate_seedance_video,
     upload_to_mux,
@@ -84,7 +89,7 @@ async def main():
     print("Content Worker")
     print("=" * 50)
     print(f"Queue: {TASK_QUEUE}")
-    print("Workflows: CreateCompanyWorkflow, CreateArticleWorkflow")
+    print("Workflows: CreateCompanyWorkflow, CreateArticleWorkflow, CreateVideoWorkflow, CreateNewsWorkflow")
     print("=" * 50)
 
     client = await get_temporal_client()
@@ -96,6 +101,8 @@ async def main():
         workflows=[
             CreateCompanyWorkflow,
             CreateArticleWorkflow,
+            CreateVideoWorkflow,
+            CreateNewsWorkflow,
         ],
         activities=[
             # Company
@@ -118,6 +125,11 @@ async def main():
             generate_four_act_article,
             save_article_to_neon,
             sync_article_to_zep,
+            get_article_by_id,
+            # News
+            get_recent_articles,
+            assess_news_relevance,
+            # Video
             generate_video_prompt,
             generate_seedance_video,
             upload_to_mux,

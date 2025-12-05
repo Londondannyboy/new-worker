@@ -682,6 +682,199 @@ async def save_article_to_neon(article: Dict[str, Any], four_act_content: List[D
 
 
 @activity.defn
+async def get_recent_articles(app: str, days: int = 7, limit: int = 50) -> Dict[str, Any]:
+    """Get recently published articles to check for duplicates."""
+    import os
+    import asyncpg
+
+    activity.logger.info(f"Getting recent articles for {app} (last {days} days)")
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return {"success": False, "articles": [], "error": "DATABASE_URL not set"}
+
+    try:
+        conn = await asyncpg.connect(database_url)
+        try:
+            rows = await conn.fetch("""
+                SELECT id, slug, title, created_at
+                FROM articles
+                WHERE app = $1
+                  AND created_at > NOW() - INTERVAL '%s days'
+                ORDER BY created_at DESC
+                LIMIT $2
+            """ % days, app, limit)
+
+            articles = [
+                {"id": row["id"], "slug": row["slug"], "title": row["title"]}
+                for row in rows
+            ]
+            return {"success": True, "articles": articles}
+
+        finally:
+            await conn.close()
+
+    except Exception as e:
+        activity.logger.error(f"Failed to get recent articles: {e}")
+        return {"success": False, "articles": [], "error": str(e)}
+
+
+class NewsAssessment(BaseModel):
+    """AI assessment of a news story."""
+    is_relevant: bool
+    relevance_score: float
+    priority: str  # high, medium, low
+    reason: str
+    suggested_angle: Optional[str] = None
+
+
+@activity.defn
+async def assess_news_relevance(stories: List[Dict[str, Any]], app: str, recent_titles: List[str]) -> Dict[str, Any]:
+    """AI assesses news stories for relevance and priority.
+
+    Returns stories scored for relevance to the app's focus area.
+    Filters out duplicates and low-relevance stories.
+    """
+    activity.logger.info(f"Assessing {len(stories)} news stories for {app}")
+
+    # App-specific context
+    app_contexts = {
+        "placement": {
+            "focus": "private equity, M&A, corporate finance, executive recruitment",
+            "keywords": ["private equity", "acquisition", "merger", "fund", "investment", "deal"],
+            "audience": "finance professionals, executives, investors"
+        },
+        "relocation": {
+            "focus": "expat life, digital nomad visas, international relocation, living abroad",
+            "keywords": ["visa", "expat", "relocation", "nomad", "immigration", "living abroad"],
+            "audience": "people considering or planning international relocation"
+        }
+    }
+    context = app_contexts.get(app, app_contexts["placement"])
+
+    # Filter obvious duplicates by title similarity
+    recent_lower = [t.lower() for t in recent_titles]
+
+    relevant_stories = []
+    gateway = AIGateway()
+
+    try:
+        for story in stories[:20]:  # Limit to 20 stories
+            title = story.get("title", "")
+            snippet = story.get("snippet", "")
+
+            # Skip if too similar to recent article
+            title_lower = title.lower()
+            if any(title_lower in recent or recent in title_lower for recent in recent_lower if len(recent) > 20):
+                activity.logger.info(f"Skipping duplicate: {title[:50]}...")
+                continue
+
+            # AI assessment
+            prompt = f"""Assess this news story for {app} platform:
+
+Title: {title}
+Summary: {snippet}
+
+Platform Focus: {context['focus']}
+Target Audience: {context['audience']}
+Key Topics: {', '.join(context['keywords'])}
+
+Rate relevance 0-1, priority (high/medium/low), and explain briefly.
+Return JSON: {{"is_relevant": true, "relevance_score": 0.8, "priority": "high", "reason": "...", "suggested_angle": "..."}}"""
+
+            try:
+                result = await gateway.structured_output(prompt=prompt, response_model=NewsAssessment, model="quick")
+
+                if result.is_relevant and result.relevance_score >= 0.6:
+                    relevant_stories.append({
+                        "story": story,
+                        "relevance_score": result.relevance_score,
+                        "priority": result.priority,
+                        "reason": result.reason,
+                        "suggested_angle": result.suggested_angle,
+                    })
+                    activity.logger.info(f"Relevant ({result.priority}): {title[:50]}...")
+            except Exception as e:
+                activity.logger.warning(f"Assessment failed for story: {e}")
+                continue
+
+        # Sort by priority and relevance
+        relevant_stories.sort(key=lambda x: (
+            {"high": 0, "medium": 1, "low": 2}.get(x["priority"], 2),
+            -x["relevance_score"]
+        ))
+
+        high = len([s for s in relevant_stories if s["priority"] == "high"])
+        medium = len([s for s in relevant_stories if s["priority"] == "medium"])
+        low = len([s for s in relevant_stories if s["priority"] == "low"])
+
+        activity.logger.info(f"Assessment complete: {len(relevant_stories)} relevant (high={high}, medium={medium}, low={low})")
+
+        return {
+            "success": True,
+            "relevant_stories": relevant_stories,
+            "total_assessed": min(len(stories), 20),
+            "total_high": high,
+            "total_medium": medium,
+            "total_low": low,
+            "cost": 0.002 * len(relevant_stories)
+        }
+
+    except Exception as e:
+        activity.logger.error(f"News assessment failed: {e}")
+        return {"success": False, "relevant_stories": [], "error": str(e)}
+    finally:
+        await gateway.close()
+
+
+@activity.defn
+async def get_article_by_id(article_id: Any) -> Dict[str, Any]:
+    """Get an article by ID from Neon database."""
+    import os
+    import asyncpg
+
+    activity.logger.info(f"Getting article: {article_id}")
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return {"success": False, "error": "DATABASE_URL not set"}
+
+    try:
+        conn = await asyncpg.connect(database_url)
+        try:
+            row = await conn.fetchrow(
+                "SELECT id, slug, title, app, payload, status, playback_id FROM articles WHERE id = $1",
+                int(article_id)
+            )
+
+            if not row:
+                return {"success": False, "error": f"Article {article_id} not found"}
+
+            payload = json.loads(row["payload"]) if row["payload"] else {}
+
+            return {
+                "success": True,
+                "article": {
+                    "id": row["id"],
+                    "slug": row["slug"],
+                    "title": row["title"],
+                    "app": row["app"],
+                    "status": row["status"],
+                    "playback_id": row["playback_id"],
+                    "four_act_content": payload.get("four_act_content", []),
+                    "payload": payload,
+                }
+            }
+
+        finally:
+            await conn.close()
+
+    except Exception as e:
+        activity.logger.error(f"Failed to get article: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@activity.defn
 async def sync_article_to_zep(article_id: str, article: Dict[str, Any], key_facts: List[str], app: str) -> Dict[str, Any]:
     """Sync article to Zep knowledge graph."""
     activity.logger.info(f"Syncing article to Zep: {article_id}")
@@ -716,16 +909,178 @@ async def generate_video_prompt(four_act_content: List[Dict[str, Any]], app: str
 
 @activity.defn
 async def generate_seedance_video(prompt: str, video_quality: str = "medium") -> Dict[str, Any]:
-    """Generate 4-act video using Seedance (placeholder)."""
+    """Generate 4-act video using Seedance on Replicate.
+
+    Uses bytedance/seedance-1-pro-fast model for 12-second 4-act videos.
+    Cost: ~$0.30 for 12s at 720p.
+    """
+    import os
+    import time
+    import replicate
+
     activity.logger.info("Generating Seedance video")
-    return {"success": False, "video_url": None, "error": "Seedance integration not implemented", "cost": 0}
+
+    replicate_token = os.environ.get("REPLICATE_API_TOKEN")
+    if not replicate_token:
+        return {"success": False, "video_url": None, "error": "REPLICATE_API_TOKEN not set", "cost": 0}
+
+    # Quality config
+    quality_config = {
+        "high": {"resolution": "720p", "cost_per_second": 0.03},
+        "medium": {"resolution": "720p", "cost_per_second": 0.025},
+        "low": {"resolution": "720p", "cost_per_second": 0.025},
+    }
+    config = quality_config.get(video_quality, quality_config["medium"])
+
+    # Add no-text rule to prompt
+    seedance_prompt = f"{prompt.strip()} CRITICAL: NO text, NO words, NO letters - purely visual only."
+
+    activity.logger.info(f"Seedance prompt: {seedance_prompt[:150]}...")
+    activity.logger.info(f"Quality: {video_quality}, Resolution: {config['resolution']}")
+
+    try:
+        # Create prediction (non-blocking)
+        client = replicate.Client(api_token=replicate_token)
+        prediction = client.predictions.create(
+            version="bytedance/seedance-1-pro-fast",
+            input={
+                "prompt": seedance_prompt,
+                "duration": 12,  # 4 acts × 3 seconds
+                "resolution": config["resolution"],
+                "aspect_ratio": "16:9",
+                "camera_fixed": False,
+                "fps": 24
+            }
+        )
+
+        activity.logger.info(f"Prediction created: {prediction.id}")
+
+        # Poll with heartbeats
+        max_wait = 600  # 10 minutes max
+        poll_interval = 5
+        elapsed = 0
+
+        while elapsed < max_wait:
+            prediction.reload()
+            activity.heartbeat(f"Seedance: {prediction.status}, {elapsed}s")
+
+            if prediction.status == "succeeded":
+                video_url = prediction.output
+                cost = config["cost_per_second"] * 12
+                activity.logger.info(f"Video generated: {video_url}")
+                return {
+                    "success": True,
+                    "video_url": video_url,
+                    "duration": 12,
+                    "cost": cost,
+                    "model": "bytedance/seedance-1-pro-fast"
+                }
+            elif prediction.status == "failed":
+                return {"success": False, "video_url": None, "error": f"Seedance failed: {prediction.error}", "cost": 0}
+            elif prediction.status == "canceled":
+                return {"success": False, "video_url": None, "error": "Seedance canceled", "cost": 0}
+
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+
+        return {"success": False, "video_url": None, "error": f"Seedance timed out after {max_wait}s", "cost": 0}
+
+    except Exception as e:
+        activity.logger.error(f"Seedance error: {e}")
+        return {"success": False, "video_url": None, "error": str(e), "cost": 0}
 
 
 @activity.defn
-async def upload_to_mux(video_url: str, article_id: str, app: str) -> Dict[str, Any]:
-    """Upload video to MUX (placeholder)."""
+async def upload_to_mux(video_url: str, article_id: str, app: str, title: Optional[str] = None) -> Dict[str, Any]:
+    """Upload video to MUX from URL.
+
+    Creates a MUX asset with proper metadata for dashboard visibility.
+    Returns playback_id, asset_id, and thumbnail URLs.
+    """
+    import os
+    import time
+    import mux_python
+
     activity.logger.info(f"Uploading video to MUX for article: {article_id}")
-    return {"success": False, "playback_id": None, "asset_id": None, "error": "MUX integration not implemented"}
+
+    mux_token_id = os.environ.get("MUX_TOKEN_ID")
+    mux_token_secret = os.environ.get("MUX_TOKEN_SECRET")
+
+    if not mux_token_id or not mux_token_secret:
+        return {"success": False, "playback_id": None, "asset_id": None, "error": "MUX credentials not set"}
+
+    try:
+        # Configure MUX client
+        configuration = mux_python.Configuration()
+        configuration.username = mux_token_id
+        configuration.password = mux_token_secret
+        client = mux_python.ApiClient(configuration)
+        assets_api = mux_python.AssetsApi(client)
+
+        # Build passthrough for dashboard visibility
+        passthrough_parts = []
+        if title:
+            passthrough_parts.append(title[:80])
+        passthrough_parts.append(f"app:{app}")
+        passthrough_parts.append(f"id:{article_id}")
+        passthrough = " | ".join(passthrough_parts)[:255]
+
+        activity.logger.info(f"MUX label: {passthrough}")
+
+        # Create asset from URL
+        meta_obj = {}
+        if title:
+            meta_obj["title"] = title[:100]
+        meta_obj["app"] = app
+
+        create_asset_request = mux_python.CreateAssetRequest(
+            input=[mux_python.InputSettings(url=video_url)],
+            playback_policy=[mux_python.PlaybackPolicy.PUBLIC],
+            passthrough=passthrough,
+            meta=meta_obj if meta_obj else None
+        )
+
+        asset = assets_api.create_asset(create_asset_request)
+        asset_id = asset.data.id
+        activity.logger.info(f"MUX asset created: {asset_id}")
+
+        # Wait for asset to be ready
+        max_attempts = 60  # 2 minutes max
+        for attempt in range(max_attempts):
+            asset_status = assets_api.get_asset(asset_id)
+            activity.heartbeat(f"MUX: {asset_status.data.status}, attempt {attempt}")
+
+            if asset_status.data.status == "ready":
+                playback_id = asset_status.data.playback_ids[0].id
+                duration = asset_status.data.duration or 12
+
+                activity.logger.info(f"MUX ready! Playback ID: {playback_id}")
+
+                # Generate thumbnail URLs
+                image_base = f"https://image.mux.com/{playback_id}"
+                stream_base = f"https://stream.mux.com/{playback_id}"
+
+                return {
+                    "success": True,
+                    "asset_id": asset_id,
+                    "playback_id": playback_id,
+                    "duration": duration,
+                    "stream_url": f"{stream_base}.m3u8",
+                    "gif_url": f"{image_base}/animated.gif?start=0&end=5&width=480&fps=15",
+                    "thumbnail_url": f"{image_base}/thumbnail.jpg?time=6&width=640",
+                    "thumbnail_hero": f"{image_base}/thumbnail.jpg?time=6&width=1920&height=1080&fit_mode=smartcrop",
+                }
+            elif asset_status.data.status == "errored":
+                errors = asset_status.data.errors
+                return {"success": False, "playback_id": None, "asset_id": asset_id, "error": f"MUX error: {errors}"}
+
+            time.sleep(2)
+
+        return {"success": False, "playback_id": None, "asset_id": asset_id, "error": "MUX processing timed out"}
+
+    except Exception as e:
+        activity.logger.error(f"MUX error: {e}")
+        return {"success": False, "playback_id": None, "asset_id": None, "error": str(e)}
 
 
 @activity.defn
@@ -740,7 +1095,58 @@ async def build_video_narrative(playback_id: str, four_act_content: List[Dict[st
 
 
 @activity.defn
-async def update_article_with_video(article_id: str, playback_id: str, asset_id: str, video_narrative: Dict[str, Any]) -> Dict[str, Any]:
-    """Update article with video metadata."""
-    activity.logger.info(f"Updating article {article_id} with video")
-    return {"success": True, "article_id": article_id, "status": "published"}
+async def update_article_with_video(article_id: Any, playback_id: str, asset_id: str, video_narrative: Dict[str, Any]) -> Dict[str, Any]:
+    """Update article with video metadata in Neon.
+
+    Sets playback_id on article and updates payload with video info.
+    Also publishes the article (status = 'published').
+    """
+    import os
+    import asyncpg
+
+    activity.logger.info(f"Updating article {article_id} with video {playback_id}")
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return {"success": False, "error": "DATABASE_URL not set"}
+
+    try:
+        conn = await asyncpg.connect(database_url)
+        try:
+            # Get current payload
+            row = await conn.fetchrow(
+                "SELECT payload FROM articles WHERE id = $1",
+                int(article_id)
+            )
+
+            if not row:
+                return {"success": False, "error": f"Article {article_id} not found"}
+
+            # Update payload with video info
+            payload = json.loads(row["payload"]) if row["payload"] else {}
+            payload["video"] = {
+                "playback_id": playback_id,
+                "asset_id": asset_id,
+                "narrative": video_narrative,
+                "thumbnails": video_narrative.get("thumbnails", {}),
+            }
+
+            # Update article
+            await conn.execute("""
+                UPDATE articles
+                SET playback_id = $1,
+                    payload = $2,
+                    status = 'published',
+                    updated_at = NOW()
+                WHERE id = $3
+            """, playback_id, json.dumps(payload), int(article_id))
+
+            activity.logger.info(f"Article {article_id} updated with video and published")
+            return {"success": True, "article_id": article_id, "status": "published"}
+
+        finally:
+            await conn.close()
+
+    except Exception as e:
+        activity.logger.error(f"Failed to update article with video: {e}")
+        return {"success": False, "error": str(e)}

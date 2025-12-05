@@ -31,6 +31,11 @@ with workflow.unsafe.imports_passed_through():
         generate_four_act_article,
         save_article_to_neon,
         sync_article_to_zep,
+        get_article_by_id,
+        # News activities
+        get_recent_articles,
+        assess_news_relevance,
+        # Video activities
         generate_video_prompt,
         generate_seedance_video,
         upload_to_mux,
@@ -282,7 +287,7 @@ class CreateArticleWorkflow:
                 if video_result.get("success") and video_result.get("video_url"):
                     mux_result = await workflow.execute_activity(
                         upload_to_mux,
-                        args=[video_result.get("video_url"), article_id, app],
+                        args=[video_result.get("video_url"), article_id, app, article.get("title")],
                         start_to_close_timeout=timedelta(minutes=5),
                     )
                     if mux_result.get("success"):
@@ -310,4 +315,276 @@ class CreateArticleWorkflow:
             "word_count": article.get("word_count"),
             "total_cost": total_cost,
             "duration_seconds": duration,
+        }
+
+
+@workflow.defn
+class CreateVideoWorkflow:
+    """Generate a video for an existing article.
+
+    Takes an article_id and generates a 4-act video from the article's
+    four_act_content, then uploads to MUX and updates the article.
+
+    Input:
+        article_id: ID of the article to generate video for
+        video_quality: "low", "medium", or "high" (default: "medium")
+        character_style: Optional style hint for video
+
+    Output:
+        success: bool
+        article_id: str
+        playback_id: str (MUX playback ID)
+        cost: float
+    """
+
+    @workflow.run
+    async def run(self, input_dict: Dict[str, Any]) -> Dict[str, Any]:
+        article_id = input_dict.get("article_id")
+        video_quality = input_dict.get("video_quality", "medium")
+        character_style = input_dict.get("character_style")
+
+        if not article_id:
+            return {"success": False, "error": "article_id is required"}
+
+        workflow.logger.info(f"CreateVideoWorkflow starting for article: {article_id}")
+        start_time = workflow.now()
+
+        # Phase 1: Get article
+        article_result = await workflow.execute_activity(
+            get_article_by_id,
+            args=[article_id],
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+        if not article_result.get("success"):
+            return {"success": False, "error": article_result.get("error")}
+
+        article = article_result.get("article", {})
+        four_act_content = article.get("four_act_content", [])
+        app = article.get("app", "placement")
+        title = article.get("title", "")
+
+        # Check if already has video
+        if article.get("playback_id"):
+            workflow.logger.info(f"Article already has video: {article.get('playback_id')}")
+            return {
+                "success": True,
+                "article_id": article_id,
+                "playback_id": article.get("playback_id"),
+                "status": "already_exists",
+                "cost": 0,
+            }
+
+        # Phase 2: Generate video prompt
+        prompt_result = await workflow.execute_activity(
+            generate_video_prompt,
+            args=[four_act_content, app, character_style],
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+        if not prompt_result.get("success"):
+            return {"success": False, "error": f"Failed to generate prompt: {prompt_result.get('error')}"}
+
+        # Phase 3: Generate video with Seedance
+        video_result = await workflow.execute_activity(
+            generate_seedance_video,
+            args=[prompt_result.get("prompt"), video_quality],
+            start_to_close_timeout=timedelta(minutes=10),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+        if not video_result.get("success"):
+            return {"success": False, "error": f"Video generation failed: {video_result.get('error')}"}
+
+        video_url = video_result.get("video_url")
+        total_cost = video_result.get("cost", 0)
+
+        # Phase 4: Upload to MUX (with title for dashboard)
+        mux_result = await workflow.execute_activity(
+            upload_to_mux,
+            args=[video_url, article_id, app, title],
+            start_to_close_timeout=timedelta(minutes=5),
+        )
+        if not mux_result.get("success"):
+            return {"success": False, "error": f"MUX upload failed: {mux_result.get('error')}", "cost": total_cost}
+
+        playback_id = mux_result.get("playback_id")
+        asset_id = mux_result.get("asset_id")
+
+        # Phase 5: Build video narrative
+        video_narrative = await workflow.execute_activity(
+            build_video_narrative,
+            args=[playback_id, four_act_content],
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+
+        # Phase 6: Update article with video
+        await workflow.execute_activity(
+            update_article_with_video,
+            args=[article_id, playback_id, asset_id, video_narrative],
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+
+        duration = (workflow.now() - start_time).total_seconds()
+        workflow.logger.info(f"Video created for article {article_id}: {playback_id}")
+
+        return {
+            "success": True,
+            "article_id": article_id,
+            "playback_id": playback_id,
+            "asset_id": asset_id,
+            "cost": total_cost,
+            "duration_seconds": duration,
+        }
+
+
+@workflow.defn
+class CreateNewsWorkflow:
+    """Monitor news and create articles for relevant stories.
+
+    Scheduled workflow that:
+    1. Searches for news via Serper
+    2. Gets recent articles to avoid duplicates
+    3. AI assesses relevance and priority
+    4. Spawns CreateArticleWorkflow for top stories
+
+    Input:
+        app: "placement" or "relocation"
+        keywords: List of keywords to search
+        max_articles: Max articles to create (default: 3)
+        min_relevance: Minimum relevance score (default: 0.6)
+        generate_video: Whether to generate videos (default: True)
+
+    Output:
+        success: bool
+        stories_found: int
+        stories_relevant: int
+        articles_created: List of created articles
+    """
+
+    @workflow.run
+    async def run(self, input_dict: Dict[str, Any]) -> Dict[str, Any]:
+        app = input_dict.get("app", "placement")
+        keywords = input_dict.get("keywords", [])
+        max_articles = input_dict.get("max_articles", 3)
+        min_relevance = input_dict.get("min_relevance", 0.6)
+        generate_video = input_dict.get("generate_video", True)
+        video_quality = input_dict.get("video_quality", "medium")
+
+        # Default keywords by app
+        if not keywords:
+            keywords = {
+                "placement": ["private equity news", "M&A deals", "corporate finance"],
+                "relocation": ["digital nomad visa", "expat news", "international relocation"]
+            }.get(app, ["news"])
+
+        total_cost = 0.0
+        workflow.logger.info(f"CreateNewsWorkflow starting for: {app}")
+        workflow.logger.info(f"Keywords: {keywords}")
+
+        # Phase 1: Search news
+        all_stories = []
+        for keyword in keywords[:3]:  # Limit to 3 keywords
+            news_result = await workflow.execute_activity(
+                search_news,
+                args=[keyword, 10],
+                start_to_close_timeout=timedelta(minutes=2),
+            )
+            all_stories.extend(news_result.get("articles", []))
+            total_cost += news_result.get("cost", 0)
+
+        # Deduplicate by URL
+        seen_urls = set()
+        unique_stories = []
+        for story in all_stories:
+            url = story.get("url", "").lower().split("?")[0]
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                unique_stories.append(story)
+
+        workflow.logger.info(f"Found {len(unique_stories)} unique stories")
+
+        if not unique_stories:
+            return {
+                "success": True,
+                "app": app,
+                "stories_found": 0,
+                "stories_relevant": 0,
+                "articles_created": [],
+                "message": "No news stories found"
+            }
+
+        # Phase 2: Get recent articles for duplicate check
+        recent_result = await workflow.execute_activity(
+            get_recent_articles,
+            args=[app, 7, 50],
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+        recent_titles = [a.get("title", "") for a in recent_result.get("articles", [])]
+
+        # Phase 3: AI assessment
+        assessment_result = await workflow.execute_activity(
+            assess_news_relevance,
+            args=[unique_stories, app, recent_titles],
+            start_to_close_timeout=timedelta(minutes=5),
+        )
+        total_cost += assessment_result.get("cost", 0)
+
+        relevant_stories = assessment_result.get("relevant_stories", [])
+        workflow.logger.info(f"Assessment: {len(relevant_stories)} relevant stories")
+
+        # Phase 4: Create articles for top stories
+        articles_created = []
+
+        for story_data in relevant_stories[:max_articles]:
+            story = story_data.get("story", {})
+            priority = story_data.get("priority", "medium")
+            title = story.get("title", "")
+
+            workflow.logger.info(f"Creating article: {title[:50]}...")
+
+            # Build article input
+            article_input = {
+                "topic": title,
+                "app": app,
+                "article_type": "news",
+                "word_count": 1500,
+                "generate_video": generate_video and priority in ["high", "medium"],
+                "video_quality": video_quality,
+            }
+
+            try:
+                # Execute child workflow
+                result = await workflow.execute_child_workflow(
+                    "CreateArticleWorkflow",
+                    article_input,
+                    id=f"news-article-{workflow.uuid4().hex[:8]}",
+                    task_queue=workflow.info().task_queue,
+                )
+
+                if result.get("success"):
+                    articles_created.append({
+                        "article_id": result.get("article_id"),
+                        "slug": result.get("slug"),
+                        "title": result.get("title"),
+                        "priority": priority,
+                        "video_playback_id": result.get("video_playback_id"),
+                    })
+                    total_cost += result.get("total_cost", 0)
+                    workflow.logger.info(f"Article created: {result.get('slug')}")
+                else:
+                    workflow.logger.warning(f"Article creation failed: {result.get('error')}")
+
+            except Exception as e:
+                workflow.logger.error(f"Failed to create article: {e}")
+
+        workflow.logger.info(f"CreateNewsWorkflow complete: {len(articles_created)} articles created")
+
+        return {
+            "success": True,
+            "app": app,
+            "stories_found": len(unique_stories),
+            "stories_relevant": len(relevant_stories),
+            "articles_created": articles_created,
+            "high_priority": assessment_result.get("total_high", 0),
+            "medium_priority": assessment_result.get("total_medium", 0),
+            "low_priority": assessment_result.get("total_low", 0),
+            "total_cost": total_cost,
         }
