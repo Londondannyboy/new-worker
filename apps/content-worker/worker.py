@@ -55,7 +55,7 @@ from activities import (
 )
 
 
-TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "quest-content-queue")
+TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "new-content-queue")
 
 
 async def get_temporal_client() -> Client:

@@ -28,7 +28,35 @@ async def crawl4ai_crawl(
     Returns:
         Dict with markdown content, links, metadata
     """
-    crawl4ai_url = os.getenv("CRAWL4AI_URL", "http://localhost:11235")
+    crawl4ai_url = os.getenv("CRAWL4AI_URL") or os.getenv("CRAWL4AI_SERVICE_URL")
+
+    if not crawl4ai_url:
+        # Fallback: use httpx to fetch the page directly
+        logger.warning("crawl4ai_url_not_set", url=url, fallback="httpx")
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                response = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                if response.is_success:
+                    # Basic text extraction
+                    text = response.text
+                    # Remove script/style tags roughly
+                    import re
+                    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                    text = re.sub(r'<[^>]+>', ' ', text)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    return {
+                        "success": True,
+                        "url": url,
+                        "content": text[:10000],
+                        "html": response.text[:5000],
+                        "title": "",
+                        "links": [],
+                        "external_links": [],
+                    }
+        except Exception as e:
+            logger.error("httpx_fallback_error", error=str(e))
+        return {"success": False, "error": "CRAWL4AI_URL not set and httpx fallback failed", "content": "", "links": []}
 
     logger.info("crawl4ai_crawl", url=url, depth=depth)
 
