@@ -150,41 +150,165 @@ async def check_research_ambiguity(sources: List[Dict[str, Any]], domain: str) -
     return {"is_ambiguous": len(signals) > 0 and "insufficient_sources" in signals, "signals": signals}
 
 
+class ProfileSection(BaseModel):
+    """A narrative section of the company profile."""
+    title: str
+    content: str
+    confidence: float = 0.8
+
+
 class CompanyProfileOutput(BaseModel):
+    """Full company profile with structured data and narrative sections."""
+    # Essential
     legal_name: str
     slug: str
+    website: str
+    domain: str
+    company_type: str
+
+    # Short-form text
     tagline: Optional[str] = None
-    about: str
-    what_we_do: Optional[str] = None
-    category: str
-    sub_category: Optional[str] = None
+    short_description: Optional[str] = None
+
+    # Structured data
+    industry: Optional[str] = None
+    headquarters_city: Optional[str] = None
+    headquarters_country: Optional[str] = None
     founded_year: Optional[int] = None
-    headquarters: Optional[str] = None
+    employee_range: Optional[str] = None
+
+    # Contact
+    linkedin_url: Optional[str] = None
+    twitter_url: Optional[str] = None
+
+    # Lists
     services: List[str] = []
     sectors: List[str] = []
     key_clients: List[str] = []
 
+    # Narrative sections
+    overview: Optional[str] = None
+    services_section: Optional[str] = None
+    team_section: Optional[str] = None
+    track_record: Optional[str] = None
+
 
 @activity.defn
 async def generate_company_profile(sources: List[Dict[str, Any]], domain: str, category: str, app: str, jurisdiction: str) -> Dict[str, Any]:
-    """Generate company profile using AI."""
+    """Generate comprehensive company profile using AI."""
     activity.logger.info(f"Generating profile for {domain}")
-    context_parts = [source.get("content", source.get("summary", ""))[:2000] for source in sources[:8]]
-    context = "\n\n".join(context_parts)
+
+    context_parts = [source.get("content", source.get("summary", ""))[:3000] for source in sources[:10]]
+    context = "\n\n---\n\n".join(context_parts)
+
     prompt = f"""Create a comprehensive company profile for {domain}.
 
-Research Context:
+RESEARCH CONTEXT:
 {context}
 
-Category: {category}, Jurisdiction: {jurisdiction}
+INSTRUCTIONS:
+Generate a detailed profile with these requirements:
 
-Generate: legal_name, slug, tagline, about (2-3 paragraphs), what_we_do, category, services, sectors, key_clients.
-Be factual - only include information from research."""
+ESSENTIAL FIELDS (all required):
+- legal_name: Official company name
+- slug: URL-friendly slug (lowercase, hyphens, e.g., "acme-corporation")
+- website: Full website URL (https://{domain})
+- domain: Just the domain ({domain})
+- company_type: One of: {category}
+
+SHORT-FORM (required):
+- tagline: Compelling one-liner (10-15 words), plain text
+- short_description: 2-3 sentence summary (40-60 words) for preview cards, plain text
+
+STRUCTURED DATA (extract if found):
+- industry: Primary industry/sector
+- headquarters_city: City where HQ is located
+- headquarters_country: Country where HQ is located
+- founded_year: Year founded (number only)
+- employee_range: One of: "1-10", "10-50", "50-100", "100-500", "500+"
+- linkedin_url: Full LinkedIn URL if found
+- twitter_url: Full Twitter/X URL if found
+
+LISTS (include relevant items found):
+- services: List of services/products offered
+- sectors: Industries or sectors served
+- key_clients: Notable clients or partnerships
+
+NARRATIVE SECTIONS (write 2-4 paragraphs each, use markdown):
+- overview: What the company does, value proposition, business model
+- services_section: Detailed services, products, how they work
+- team_section: Key executives, founders, leadership (if found)
+- track_record: Notable deals, projects, achievements, results
+
+Be factual - only include information found in the research context.
+Use markdown formatting in narrative sections (bold, lists, etc.).
+"""
 
     gateway = AIGateway()
     try:
-        profile = await gateway.structured_output(prompt=prompt, response_model=CompanyProfileOutput, model="quick", system_prompt="You are a professional business analyst.")
-        return {"success": True, "profile": profile.model_dump(), "cost": 0.005}
+        profile = await gateway.structured_output(
+            prompt=prompt,
+            response_model=CompanyProfileOutput,
+            model="quality",  # Use GPT-4o for better quality
+            system_prompt="You are an expert company analyst who creates comprehensive, factual profiles from research data. Write in a professional, engaging style."
+        )
+
+        # Build profile_sections dict from narrative fields
+        profile_dict = profile.model_dump()
+        profile_sections = {}
+
+        if profile.overview:
+            profile_sections["overview"] = {
+                "title": "Overview",
+                "content": profile.overview,
+                "confidence": 0.9
+            }
+
+        if profile.services_section:
+            profile_sections["services"] = {
+                "title": "Services",
+                "content": profile.services_section,
+                "confidence": 0.85
+            }
+
+        if profile.team_section:
+            profile_sections["team"] = {
+                "title": "Team",
+                "content": profile.team_section,
+                "confidence": 0.8
+            }
+
+        if profile.track_record:
+            profile_sections["track_record"] = {
+                "title": "Track Record",
+                "content": profile.track_record,
+                "confidence": 0.75
+            }
+
+        # Add profile_sections to payload
+        profile_dict["profile_sections"] = profile_sections
+        profile_dict["section_count"] = len(profile_sections)
+        profile_dict["total_content_length"] = sum(
+            len(s["content"]) for s in profile_sections.values()
+        )
+
+        # Add metadata
+        profile_dict["research_date"] = datetime.utcnow().isoformat()
+        profile_dict["last_updated"] = datetime.utcnow().isoformat()
+        profile_dict["confidence_score"] = 0.85
+        profile_dict["data_sources"] = {
+            "crawl4ai": {"pages": len(sources), "success": True},
+            "serper": {"articles": 0, "cost": 0.001}
+        }
+        profile_dict["sources"] = [s.get("url", "") for s in sources if s.get("url")]
+
+        # Legacy fields for compatibility
+        profile_dict["about"] = profile.short_description or profile.overview
+        profile_dict["category"] = profile.company_type
+        profile_dict["headquarters"] = f"{profile.headquarters_city}, {profile.headquarters_country}" if profile.headquarters_city else None
+
+        return {"success": True, "profile": profile_dict, "cost": 0.01}
+
     except Exception as e:
         activity.logger.error(f"Profile generation failed: {e}")
         return {"success": False, "error": str(e)}
@@ -203,6 +327,13 @@ async def extract_and_process_logo(url: str, company_name: str) -> Dict[str, Any
 async def save_company_to_neon(profile: Dict[str, Any], app: str) -> Dict[str, Any]:
     """Save company profile to Neon PostgreSQL."""
     activity.logger.info(f"Saving company: {profile.get('slug')}")
+
+    # Extract overview from profile_sections if available
+    profile_sections = profile.get("profile_sections", {})
+    overview_text = None
+    if "overview" in profile_sections:
+        overview_text = profile_sections["overview"].get("content", "")
+
     # Only include columns that exist in the companies table
     data = {
         "slug": profile.get("slug"),
@@ -211,15 +342,25 @@ async def save_company_to_neon(profile: Dict[str, Any], app: str) -> Dict[str, A
         "payload": json.dumps(profile),
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
-        # Optional columns
-        "description": profile.get("about"),
-        "headquarters": profile.get("headquarters"),
+        # Core text fields
+        "description": profile.get("short_description") or profile.get("about"),
+        "meta_description": profile.get("short_description"),
+        "overview": overview_text or profile.get("overview"),
+        # Structured data
+        "headquarters": profile.get("headquarters") or (
+            f"{profile.get('headquarters_city')}, {profile.get('headquarters_country')}"
+            if profile.get("headquarters_city") else None
+        ),
         "logo_url": profile.get("logo_url"),
-        "company_type": profile.get("category"),
+        "company_type": profile.get("company_type") or profile.get("category"),
         "founded_year": profile.get("founded_year"),
-        "overview": profile.get("what_we_do"),
-        "status": "active",
+        # Status
+        "status": "published",
+        # Arrays
+        "specializations": profile.get("services", [])[:5] if profile.get("services") else None,
+        "tags": profile.get("sectors", [])[:5] if profile.get("sectors") else None,
     }
+
     # Remove None values
     data = {k: v for k, v in data.items() if v is not None}
     return await save_to_neon("companies", data, on_conflict="slug")
