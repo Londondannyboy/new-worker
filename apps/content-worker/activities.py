@@ -203,16 +203,25 @@ async def extract_and_process_logo(url: str, company_name: str) -> Dict[str, Any
 async def save_company_to_neon(profile: Dict[str, Any], app: str) -> Dict[str, Any]:
     """Save company profile to Neon PostgreSQL."""
     activity.logger.info(f"Saving company: {profile.get('slug')}")
+    # Only include columns that exist in the companies table
     data = {
         "slug": profile.get("slug"),
-        "domain": profile.get("domain", profile.get("slug", "").replace("-", ".")),
-        "name": profile.get("legal_name"),
-        "type": profile.get("category", "company"),
+        "name": profile.get("legal_name", profile.get("slug", "Unknown")),
         "app": app,
         "payload": json.dumps(profile),
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
+        # Optional columns
+        "description": profile.get("about"),
+        "headquarters": profile.get("headquarters"),
+        "logo_url": profile.get("logo_url"),
+        "company_type": profile.get("category"),
+        "founded_year": profile.get("founded_year"),
+        "overview": profile.get("what_we_do"),
+        "status": "active",
     }
+    # Remove None values
+    data = {k: v for k, v in data.items() if v is not None}
     return await save_to_neon("companies", data, on_conflict="slug")
 
 
