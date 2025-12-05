@@ -24,8 +24,9 @@ RUN pip install --no-cache-dir \
 COPY packages/ /app/packages/
 COPY apps/ /app/apps/
 
-# Set Python path
+# Set Python path and unbuffered output
 ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 
 # Run content worker
 CMD ["python", "/app/apps/content-worker/worker.py"]
