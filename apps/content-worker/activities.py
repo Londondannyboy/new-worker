@@ -334,17 +334,23 @@ async def save_company_to_neon(profile: Dict[str, Any], app: str) -> Dict[str, A
     if "overview" in profile_sections:
         overview_text = profile_sections["overview"].get("content", "")
 
+    # Truncate helper for varchar fields
+    def truncate(text, max_len):
+        if text and len(text) > max_len:
+            return text[:max_len-3] + "..."
+        return text
+
     # Only include columns that exist in the companies table
     data = {
         "slug": profile.get("slug"),
-        "name": profile.get("legal_name", profile.get("slug", "Unknown")),
+        "name": truncate(profile.get("legal_name", profile.get("slug", "Unknown")), 255),
         "app": app,
         "payload": json.dumps(profile),
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
-        # Core text fields
+        # Core text fields - meta_description has 160 char limit
         "description": profile.get("short_description") or profile.get("about"),
-        "meta_description": profile.get("short_description"),
+        "meta_description": truncate(profile.get("short_description"), 160),
         "overview": overview_text or profile.get("overview"),
         # Structured data
         "headquarters": profile.get("headquarters") or (
