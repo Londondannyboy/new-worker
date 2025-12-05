@@ -116,38 +116,76 @@ class CurationResult(BaseModel):
 @activity.defn
 async def curate_research_sources(crawled_pages: List[Dict[str, Any]], news_articles: List[Dict[str, Any]], category: str) -> Dict[str, Any]:
     """AI curates and ranks research sources."""
-    activity.logger.info("Curating research sources")
+    activity.logger.info(f"Curating research sources: {len(crawled_pages)} pages, {len(news_articles)} news")
+
+    # Build context with limited size to avoid token overflow
     context_parts = []
-    for page in crawled_pages[:5]:
-        context_parts.append(f"[Website] {page.get('title', 'Page')}:\n{page.get('content', '')[:2000]}")
-    for article in news_articles[:5]:
+    for page in crawled_pages[:3]:  # Limit to 3 pages
+        content = page.get('content', '')[:1500]  # Shorter per page
+        context_parts.append(f"[Website] {page.get('title', 'Page')}:\n{content}")
+    for article in news_articles[:3]:  # Limit to 3 news
         context_parts.append(f"[News] {article.get('title', '')}:\n{article.get('snippet', '')}")
     context = "\n\n---\n\n".join(context_parts)
-    prompt = f"""Analyze these research sources about a company (category: {category}).
+
+    prompt = f"""Analyze research sources about a company (category: {category}).
 
 {context}
 
-Rate quality and relevance of each source. Extract key facts.
-Return JSON: {{"sources": [{{"url": "...", "quality": 0.9, "relevance": 0.8, "summary": "..."}}], "confidence": 0.7, "key_facts": ["fact 1"]}}"""
+Rate quality/relevance. Extract 3-5 key facts. Keep summaries brief (1 sentence each).
+Return JSON: {{"sources": [{{"url": "...", "quality": 0.9, "relevance": 0.8, "summary": "..."}}], "confidence": 0.7, "key_facts": ["fact 1", "fact 2"]}}"""
 
     gateway = AIGateway()
     try:
-        result = await gateway.structured_output(prompt=prompt, response_model=CurationResult, model="fast")
-        return {"sources": result.sources, "confidence": result.confidence, "key_facts": result.key_facts, "cost": 0.001}
+        # Use gpt-4o-mini for reliable longer outputs (not Groq which truncates)
+        result = await gateway.structured_output(prompt=prompt, response_model=CurationResult, model="quick")
+        activity.logger.info(f"Curation success: {len(result.sources)} sources, {len(result.key_facts)} facts")
+        return {"sources": result.sources, "confidence": result.confidence, "key_facts": result.key_facts, "cost": 0.002}
     except Exception as e:
-        activity.logger.error(f"Curation failed: {e}")
-        return {"sources": [{"url": p.get("url"), "content": p.get("content", "")[:2000]} for p in crawled_pages], "confidence": 0.5, "key_facts": [], "cost": 0}
+        activity.logger.warning(f"Curation AI failed, using fallback: {e}")
+        # Fallback: combine crawled pages AND news articles as sources
+        fallback_sources = []
+        for p in crawled_pages:
+            fallback_sources.append({
+                "url": p.get("url", ""),
+                "content": p.get("content", "")[:2000],
+                "quality": 0.7,
+                "relevance": 0.8,
+                "summary": p.get("title", "Website page")
+            })
+        for n in news_articles:
+            fallback_sources.append({
+                "url": n.get("url", ""),
+                "content": n.get("snippet", ""),
+                "quality": 0.6,
+                "relevance": 0.7,
+                "summary": n.get("title", "News article")
+            })
+        activity.logger.info(f"Fallback sources: {len(fallback_sources)}")
+        return {"sources": fallback_sources, "confidence": 0.5, "key_facts": [], "cost": 0}
     finally:
         await gateway.close()
 
 
 @activity.defn
 async def check_research_ambiguity(sources: List[Dict[str, Any]], domain: str) -> Dict[str, Any]:
-    """Check if research is ambiguous."""
+    """Check if research is ambiguous - only if truly insufficient."""
     signals = []
-    if len(sources) < 2:
-        signals.append("insufficient_sources")
-    return {"is_ambiguous": len(signals) > 0 and "insufficient_sources" in signals, "signals": signals}
+
+    # Check if we have ANY usable content
+    has_content = any(
+        len(s.get("content", "") or s.get("summary", "")) > 100
+        for s in sources
+    )
+
+    if not sources:
+        signals.append("no_sources")
+    elif not has_content:
+        signals.append("no_content")
+
+    # Only ambiguous if we have zero usable data
+    is_ambiguous = "no_sources" in signals or "no_content" in signals
+    activity.logger.info(f"Ambiguity check: {len(sources)} sources, has_content={has_content}, ambiguous={is_ambiguous}")
+    return {"is_ambiguous": is_ambiguous, "signals": signals}
 
 
 class ProfileSection(BaseModel):
