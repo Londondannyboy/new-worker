@@ -429,7 +429,7 @@ Services: {', '.join(profile.get('services', []))}"""
 
 class KeywordResult(BaseModel):
     target_keyword: str
-    volume: Optional[int] = None
+    volume: Optional[int] = None  # Must be a plain integer, no commas
     difficulty: Optional[float] = None
     secondary_keywords: List[str] = []
 
@@ -442,12 +442,34 @@ async def research_keywords(topic: str, jurisdiction: str) -> Dict[str, Any]:
     try:
         prompt = f"""Suggest SEO keywords for an article about: {topic}
 Target jurisdiction: {jurisdiction}
-Return: target_keyword, secondary_keywords (3-5), volume (estimate), difficulty (0-1)"""
-        result = await gateway.structured_output(prompt=prompt, response_model=KeywordResult, model="fast")
-        return {"target_keyword": result.target_keyword, "volume": result.volume, "difficulty": result.difficulty, "secondary_keywords": result.secondary_keywords}
+
+Return JSON with:
+- target_keyword: main keyword phrase
+- secondary_keywords: ["keyword1", "keyword2", "keyword3"] (3-5 related keywords)
+- volume: estimated monthly search volume as INTEGER (e.g., 2500 NOT "2,500")
+- difficulty: SEO difficulty 0.0 to 1.0
+
+IMPORTANT: volume must be a plain integer without commas."""
+
+        # Use GPT-4o-mini for reliable JSON formatting
+        result = await gateway.structured_output(prompt=prompt, response_model=KeywordResult, model="quick")
+        activity.logger.info(f"Keyword research success: {result.target_keyword}")
+        return {
+            "target_keyword": result.target_keyword,
+            "volume": result.volume,
+            "difficulty": result.difficulty,
+            "secondary_keywords": result.secondary_keywords
+        }
     except Exception as e:
         activity.logger.warning(f"Keyword research failed: {e}")
-        return {"target_keyword": topic.lower().replace(" ", "-"), "secondary_keywords": []}
+        # Fallback: use topic as keyword
+        fallback_keyword = topic.lower().replace(" ", "-")[:50]
+        return {
+            "target_keyword": fallback_keyword,
+            "secondary_keywords": [],
+            "volume": None,
+            "difficulty": None
+        }
     finally:
         await gateway.close()
 
@@ -480,35 +502,75 @@ async def search_news(topic: str, num_results: int = 10) -> Dict[str, Any]:
 class SourceCuration(BaseModel):
     sources: List[Dict[str, Any]]
     confidence: float
-    key_facts: List[str]
-    perspectives: List[str]
-    outline: List[str]
+    key_facts: List[str]  # Simple list of fact strings
+    perspectives: List[str]  # Simple list of perspective strings
+    outline: List[str]  # Simple list of section titles
 
 
 @activity.defn
 async def curate_article_sources(crawled_pages: List[Dict[str, Any]], news_articles: List[Dict[str, Any]], topic: str) -> Dict[str, Any]:
     """AI curates and ranks research sources for article writing."""
-    activity.logger.info("Curating article sources")
+    activity.logger.info(f"Curating article sources: {len(crawled_pages)} pages, {len(news_articles)} news")
+
     context_parts = []
-    for page in crawled_pages[:5]:
-        context_parts.append(f"[Page] {page.get('title', 'Untitled')}:\n{page.get('content', '')[:2000]}")
-    for article in news_articles[:5]:
+    for page in crawled_pages[:3]:
+        context_parts.append(f"[Page] {page.get('title', 'Untitled')}:\n{page.get('content', '')[:1500]}")
+    for article in news_articles[:3]:
         context_parts.append(f"[News] {article.get('title', '')}:\n{article.get('snippet', '')}")
     context = "\n\n---\n\n".join(context_parts)
-    prompt = f"""Analyze these research sources for an article about: {topic}
+
+    prompt = f"""Analyze research sources for an article about: {topic}
 
 {context}
 
-Curate: rate quality/relevance, extract key facts, identify perspectives, suggest 4-section outline.
-Return JSON with sources, confidence, key_facts, perspectives, outline."""
+Return JSON with:
+- sources: [{{"url": "...", "quality": 0.8, "relevance": 0.9, "summary": "..."}}]
+- confidence: 0.8 (number)
+- key_facts: ["Fact 1", "Fact 2", "Fact 3"] (simple strings)
+- perspectives: ["Perspective 1", "Perspective 2"] (simple strings)
+- outline: ["Introduction", "Main Point 1", "Main Point 2", "Conclusion"] (simple section titles)
+
+IMPORTANT: key_facts, perspectives, and outline must be simple strings, NOT objects."""
 
     gateway = AIGateway()
     try:
-        result = await gateway.structured_output(prompt=prompt, response_model=SourceCuration, model="fast")
-        return {"sources": result.sources, "confidence": result.confidence, "key_facts": result.key_facts, "perspectives": result.perspectives, "outline": result.outline, "cost": 0.001}
+        # Use GPT-4o-mini for better structured output (Groq truncates)
+        result = await gateway.structured_output(prompt=prompt, response_model=SourceCuration, model="quick")
+        activity.logger.info(f"Curation success: {len(result.sources)} sources")
+        return {
+            "sources": result.sources,
+            "confidence": result.confidence,
+            "key_facts": result.key_facts,
+            "perspectives": result.perspectives,
+            "outline": result.outline,
+            "cost": 0.002
+        }
     except Exception as e:
-        activity.logger.error(f"Curation failed: {e}")
-        return {"sources": [{"url": p.get("url"), "content": p.get("content", "")[:2000]} for p in crawled_pages], "confidence": 0.5, "key_facts": [], "perspectives": [], "outline": [], "cost": 0}
+        activity.logger.warning(f"Curation failed, using fallback: {e}")
+        # Fallback: combine crawled pages AND news as sources
+        fallback_sources = []
+        for p in crawled_pages:
+            fallback_sources.append({
+                "url": p.get("url", ""),
+                "content": p.get("content", "")[:2000],
+                "quality": 0.7,
+                "summary": p.get("title", "")
+            })
+        for n in news_articles:
+            fallback_sources.append({
+                "url": n.get("url", ""),
+                "content": n.get("snippet", ""),
+                "quality": 0.6,
+                "summary": n.get("title", "")
+            })
+        return {
+            "sources": fallback_sources,
+            "confidence": 0.5,
+            "key_facts": [],
+            "perspectives": [],
+            "outline": ["Introduction", "Background", "Analysis", "Conclusion"],
+            "cost": 0
+        }
     finally:
         await gateway.close()
 
@@ -589,19 +651,33 @@ Return: title, slug, excerpt, sections (4 with title, content, factoid, visual_h
 async def save_article_to_neon(article: Dict[str, Any], four_act_content: List[Dict[str, Any]], app: str, research_sources: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Save article to Neon PostgreSQL."""
     activity.logger.info(f"Saving article: {article.get('slug')}")
+
+    # Build payload with all article data
+    payload = {
+        "sections": article.get("sections", []),
+        "four_act_content": four_act_content,
+        "target_keyword": article.get("target_keyword"),
+        "secondary_keywords": article.get("secondary_keywords", []),
+        "research_sources": [s.get("url") for s in research_sources[:10]],
+    }
+
     data = {
         "slug": article.get("slug"),
         "title": article.get("title"),
         "excerpt": article.get("excerpt"),
+        "meta_description": (article.get("excerpt") or "")[:160],
         "content": article.get("content"),
         "app": app,
-        "type": "article",
         "status": "draft",
         "word_count": article.get("word_count"),
-        "payload": json.dumps({"sections": article.get("sections", []), "four_act_content": four_act_content, "target_keyword": article.get("target_keyword"), "secondary_keywords": article.get("secondary_keywords", []), "research_sources": [s.get("url") for s in research_sources[:10]]}),
+        "target_keyword": article.get("target_keyword"),
+        "payload": json.dumps(payload),
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
     }
+
+    # Remove None values
+    data = {k: v for k, v in data.items() if v is not None}
     return await save_to_neon("articles", data, on_conflict="slug")
 
 
