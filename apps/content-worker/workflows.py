@@ -65,13 +65,19 @@ class CreateCompanyWorkflow:
 
         # Check if exists
         if not force_update:
-            exists = await workflow.execute_activity(
+            exists_result = await workflow.execute_activity(
                 check_company_exists,
                 args=[domain],
                 start_to_close_timeout=timedelta(seconds=10),
             )
-            if exists:
-                return {"success": True, "status": "exists", "domain": domain}
+            if exists_result.get("exists"):
+                return {
+                    "success": True,
+                    "status": "exists",
+                    "domain": domain,
+                    "company_id": exists_result.get("company_id"),
+                    "slug": exists_result.get("slug"),
+                }
 
         # Phase 2: Research
         crawl_result = await workflow.execute_activity(

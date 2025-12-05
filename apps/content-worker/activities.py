@@ -43,10 +43,41 @@ async def normalize_company_url(url: str, category: str) -> Dict[str, Any]:
 
 
 @activity.defn
-async def check_company_exists(domain: str) -> bool:
-    """Check if a company with this domain already exists."""
-    result = await get_from_neon("companies", {"domain": domain})
-    return result is not None
+async def check_company_exists(domain: str) -> Dict[str, Any]:
+    """Check if a company with this domain already exists in payload->>'website'."""
+    activity.logger.info(f"Checking if company exists: {domain}")
+    import os
+    import asyncpg
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return {"exists": False}
+
+    try:
+        conn = await asyncpg.connect(database_url)
+        try:
+            row = await conn.fetchrow("""
+                SELECT id, slug, updated_at
+                FROM companies
+                WHERE payload->>'website' LIKE $1
+                OR payload->>'website' LIKE $2
+                LIMIT 1
+            """, f"%{domain}%", f"%www.{domain}%")
+
+            if row:
+                activity.logger.info(f"Company exists: {row['slug']} (ID: {row['id']})")
+                return {
+                    "exists": True,
+                    "company_id": str(row["id"]),
+                    "slug": row["slug"],
+                }
+            else:
+                return {"exists": False}
+        finally:
+            await conn.close()
+    except Exception as e:
+        activity.logger.error(f"Error checking company exists: {e}")
+        return {"exists": False}
 
 
 @activity.defn
