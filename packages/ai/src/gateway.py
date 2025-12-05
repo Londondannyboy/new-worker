@@ -193,15 +193,30 @@ class AIGateway:
         Returns:
             Validated Pydantic model instance
         """
-        # Build schema-aware system prompt
+        # Get field names and descriptions for clearer instructions
         schema = response_model.model_json_schema()
-        schema_str = json.dumps(schema, indent=2)
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
 
-        full_system = f"""You must respond with valid JSON that matches this schema:
+        # Build field list for clarity
+        field_list = []
+        for name, prop in properties.items():
+            req = "(required)" if name in required else "(optional)"
+            desc = prop.get("description", "")
+            ftype = prop.get("type", "")
+            field_list.append(f"- {name} {req}: {desc}")
 
-{schema_str}
+        fields_str = "\n".join(field_list)
 
-Respond ONLY with the JSON object, no explanation or markdown."""
+        full_system = f"""You must respond with a valid JSON object containing these fields:
+
+{fields_str}
+
+IMPORTANT:
+- Return ONLY the JSON data object, NOT a schema
+- Do NOT wrap your response in "properties" or "description"
+- Start your response with {{ and end with }}
+- Include actual values for each field based on the prompt"""
 
         if system_prompt:
             full_system = f"{system_prompt}\n\n{full_system}"
@@ -227,6 +242,12 @@ Respond ONLY with the JSON object, no explanation or markdown."""
         # Parse and validate
         try:
             data = json.loads(cleaned)
+
+            # Handle case where AI wrapped data in schema format
+            if "properties" in data and "description" in data:
+                # AI returned schema-like format, extract from properties
+                data = data["properties"]
+
             return response_model.model_validate(data)
         except (json.JSONDecodeError, Exception) as e:
             logger.error(
