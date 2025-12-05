@@ -21,7 +21,7 @@ load_dotenv()
 
 # Add packages to path
 import sys
-BASE_PATH = Path("/Users/dankeegan/quest/quest-py")
+BASE_PATH = Path(__file__).parent.parent.parent  # Go up to repo root
 sys.path.insert(0, str(BASE_PATH))
 
 

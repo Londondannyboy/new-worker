@@ -4,7 +4,8 @@ Company workflows and activities re-exported for content-worker.
 
 # Re-export from company-worker
 import sys
-sys.path.insert(0, "/Users/dankeegan/quest/quest-py")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 # Import and re-export workflows
 from apps.company_worker.src.workflows import CreateCompanyWorkflow

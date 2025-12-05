@@ -16,7 +16,8 @@ from pydantic import BaseModel
 
 # Import from packages
 import sys
-sys.path.insert(0, "/Users/dankeegan/quest/quest-py")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from packages.ai.src.gateway import AIGateway, get_completion_async
 from packages.integrations.src.research import crawl4ai_crawl, serper_search

@@ -17,7 +17,8 @@ from temporalio.client import Client, TLSConfig
 
 # Import from packages
 import sys
-sys.path.insert(0, "/Users/dankeegan/quest/quest-py")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
 load_dotenv()
