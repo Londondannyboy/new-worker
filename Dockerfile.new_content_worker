@@ -1,5 +1,4 @@
-# Content Worker Dockerfile
-# Build from quest-py root: docker build -f Dockerfile.content-worker .
+# New Content Worker Dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -20,7 +19,8 @@ RUN pip install --no-cache-dir \
     psycopg2-binary>=2.9.0 \
     asyncpg>=0.29.0 \
     replicate>=0.34.0 \
-    mux-python>=3.0.0
+    mux-python>=3.0.0 \
+    zep-cloud>=2.0.0
 
 # Copy application code
 COPY packages/ /app/packages/
@@ -30,5 +30,5 @@ COPY apps/ /app/apps/
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Run content worker
-CMD ["python", "/app/apps/content-worker/worker.py"]
+# Run new content worker
+CMD ["python", "/app/apps/new_content_worker/worker.py"]

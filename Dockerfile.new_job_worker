@@ -1,5 +1,4 @@
-# Job Worker Dockerfile
-# Build from quest-py root: docker build -f Dockerfile.job-worker .
+# New Job Worker Dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -29,5 +28,5 @@ COPY apps/ /app/apps/
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Run job worker
-CMD ["python", "/app/apps/job-worker/worker.py"]
+# Run new job worker
+CMD ["python", "/app/apps/new_job_worker/worker.py"]

@@ -1,8 +1,8 @@
 """
-Content Worker
+New Content Worker
 
-Unified Temporal worker for content workflows.
-Listens on quest-content-queue.
+Clean rewrite of content workflows.
+Listens on new-content-queue.
 """
 
 import os
@@ -86,7 +86,7 @@ async def get_temporal_client() -> Client:
 async def main():
     """Run the content worker."""
     print("=" * 50)
-    print("Content Worker")
+    print("New Content Worker")
     print("=" * 50)
     print(f"Queue: {TASK_QUEUE}")
     print("Workflows: CreateCompanyWorkflow, CreateArticleWorkflow, CreateVideoWorkflow, CreateNewsWorkflow")

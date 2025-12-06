@@ -1,6 +1,6 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile.content-worker"
+dockerfilePath = "Dockerfile.new_content_worker"
 
 [deploy]
 restartPolicyType = "ON_FAILURE"

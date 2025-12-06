@@ -1,8 +1,8 @@
 """
-Job Worker
+New Job Worker
 
-Temporal worker for job scraping workflows.
-Listens on quest-job-queue.
+Clean rewrite of job scraping workflows.
+Listens on new-job-queue.
 """
 
 import os
@@ -45,7 +45,7 @@ from activities import (
 )
 
 
-TASK_QUEUE = os.getenv("JOB_WORKER_TASK_QUEUE", "quest-job-queue")
+TASK_QUEUE = os.getenv("NEW_JOB_WORKER_TASK_QUEUE", "new-job-queue")
 
 
 async def get_temporal_client() -> Client:
@@ -69,9 +69,9 @@ async def get_temporal_client() -> Client:
 
 
 async def main():
-    """Run the job worker."""
+    """Run the new job worker."""
     print("=" * 50)
-    print("Job Worker")
+    print("New Job Worker")
     print("=" * 50)
     print(f"Queue: {TASK_QUEUE}")
     print("Workflows: JobScrapingWorkflow, GreenhouseScraperWorkflow, LeverScraperWorkflow, AshbyScraperWorkflow, GenericScraperWorkflow")
