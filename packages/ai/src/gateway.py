@@ -1,18 +1,21 @@
 """
 Pydantic AI Gateway Client
 
-Unified access to AI providers via Pydantic Gateway.
-Single API key (paig_xxx) for all providers.
+Unified access to AI providers via Pydantic Gateway + Google Gemini.
 
-Supported providers via gateway:
-- OpenAI (gpt-4o, gpt-4o-mini)
-- Groq (llama-3.1-8b-instant, llama-3.1-70b-versatile) - CHEAPER!
-- Anthropic (claude-3-5-haiku, claude-sonnet-4-5)
+Supported providers:
+- OpenAI (gpt-4o, gpt-4o-mini) via Pydantic Gateway
+- Groq (llama-3.1-8b-instant, llama-3.1-70b-versatile) via Pydantic Gateway - CHEAPER!
+- Google Gemini (gemini-2.5-pro, gemini-2.5-flash) via Google's OpenAI-compatible API
 
 URL Patterns (CRITICAL):
 - OpenAI: https://gateway.pydantic.dev/proxy/openai/chat/completions
 - Groq: https://gateway.pydantic.dev/proxy/groq/openai/v1/chat/completions
-- Anthropic: https://gateway.pydantic.dev/proxy/anthropic/v1/messages
+- Google: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+
+API Keys:
+- PYDANTIC_AI_GATEWAY_API_KEY for OpenAI/Groq via gateway
+- GOOGLE_API_KEY for Gemini models
 """
 
 import os
@@ -29,34 +32,35 @@ T = TypeVar("T", bound=BaseModel)
 
 # Gateway endpoints
 GATEWAY_ENDPOINTS = {
-    # OpenAI models - note: NO /v1/ in path
+    # OpenAI models via Pydantic Gateway - note: NO /v1/ in path
     "gpt-4o": "https://gateway.pydantic.dev/proxy/openai/chat/completions",
     "gpt-4o-mini": "https://gateway.pydantic.dev/proxy/openai/chat/completions",
     "gpt-4-turbo": "https://gateway.pydantic.dev/proxy/openai/chat/completions",
 
-    # Groq models (CHEAPER!) - note: HAS /openai/v1/ in path
+    # Groq models via Pydantic Gateway (CHEAPER!) - note: HAS /openai/v1/ in path
     "llama-3.1-8b-instant": "https://gateway.pydantic.dev/proxy/groq/openai/v1/chat/completions",
     "llama-3.1-70b-versatile": "https://gateway.pydantic.dev/proxy/groq/openai/v1/chat/completions",
     "llama-3.3-70b-versatile": "https://gateway.pydantic.dev/proxy/groq/openai/v1/chat/completions",
 
-    # Anthropic models - different response format
-    "claude-3-5-haiku-latest": "https://gateway.pydantic.dev/proxy/anthropic/v1/messages",
-    "claude-sonnet-4-5": "https://gateway.pydantic.dev/proxy/anthropic/v1/messages",
+    # Google Gemini models via Google's OpenAI-compatible API (BEST QUALITY!)
+    "gemini-2.5-pro": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    "gemini-2.5-flash": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    "gemini-2.0-flash": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
 }
 
 # Model aliases for convenience
 MODEL_ALIASES = {
-    "fast": "llama-3.1-8b-instant",  # Cheapest, fastest
-    "quick": "gpt-4o-mini",
-    "quality": "gpt-4o",
-    "smart": "claude-sonnet-4-5",
-    "haiku": "claude-3-5-haiku-latest",
+    "fast": "llama-3.1-8b-instant",  # Cheapest, fastest (Groq)
+    "quick": "gpt-4o-mini",           # Fast OpenAI
+    "quality": "gpt-4o",              # Best OpenAI
+    "smart": "gemini-2.5-pro",        # Best Gemini (replaces Claude)
+    "flash": "gemini-2.5-flash",      # Fast Gemini
 }
 
 
 class AIGateway:
     """
-    Pydantic AI Gateway client.
+    AI Gateway client supporting multiple providers.
 
     Usage:
         gateway = AIGateway()
@@ -64,10 +68,19 @@ class AIGateway:
         structured = await gateway.structured_output(query, ResponseModel)
     """
 
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv("PYDANTIC_AI_GATEWAY_API_KEY")
-        if not self.api_key:
-            raise ValueError("PYDANTIC_AI_GATEWAY_API_KEY not set")
+    def __init__(
+        self,
+        gateway_api_key: Optional[str] = None,
+        google_api_key: Optional[str] = None,
+    ):
+        # Pydantic Gateway key for OpenAI/Groq
+        self.gateway_api_key = gateway_api_key or os.getenv("PYDANTIC_AI_GATEWAY_API_KEY")
+        # Google API key for Gemini models
+        self.google_api_key = google_api_key or os.getenv("GOOGLE_API_KEY")
+
+        # At least one key must be set
+        if not self.gateway_api_key and not self.google_api_key:
+            raise ValueError("No API keys set. Need PYDANTIC_AI_GATEWAY_API_KEY or GOOGLE_API_KEY")
 
         self._client = httpx.AsyncClient(timeout=120.0)
 
@@ -79,14 +92,25 @@ class AIGateway:
         """Get the correct endpoint URL for a model."""
         resolved = self._resolve_model(model)
         if resolved not in GATEWAY_ENDPOINTS:
-            # Default to OpenAI endpoint for unknown models
-            return GATEWAY_ENDPOINTS["gpt-4o-mini"]
+            # Default to Gemini for unknown models (since Anthropic is unavailable)
+            return GATEWAY_ENDPOINTS["gemini-2.5-flash"]
         return GATEWAY_ENDPOINTS[resolved]
 
-    def _is_anthropic(self, model: str) -> bool:
-        """Check if model uses Anthropic API format."""
+    def _is_google(self, model: str) -> bool:
+        """Check if model is a Google Gemini model."""
         resolved = self._resolve_model(model)
-        return resolved.startswith("claude")
+        return resolved.startswith("gemini")
+
+    def _get_api_key(self, model: str) -> str:
+        """Get the appropriate API key for a model."""
+        if self._is_google(model):
+            if not self.google_api_key:
+                raise ValueError("GOOGLE_API_KEY not set for Gemini model")
+            return self.google_api_key
+        else:
+            if not self.gateway_api_key:
+                raise ValueError("PYDANTIC_AI_GATEWAY_API_KEY not set for gateway model")
+            return self.gateway_api_key
 
     async def complete(
         self,
@@ -111,42 +135,34 @@ class AIGateway:
         """
         resolved_model = self._resolve_model(model)
         endpoint = self._get_endpoint(model)
+        api_key = self._get_api_key(model)
 
         logger.info(
             "ai_gateway_request",
             model=resolved_model,
             endpoint=endpoint,
             prompt_length=len(prompt),
+            provider="google" if self._is_google(model) else "gateway",
         )
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
 
-        if self._is_anthropic(model):
-            # Anthropic format
-            headers["anthropic-version"] = "2023-06-01"
-            body = {
-                "model": resolved_model,
-                "max_tokens": max_tokens,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-            if system_prompt:
-                body["system"] = system_prompt
-        else:
-            # OpenAI format (works for OpenAI and Groq)
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": prompt})
+        # All providers now use OpenAI-compatible format
+        # (Pydantic Gateway for OpenAI/Groq, Google's OpenAI-compatible API for Gemini)
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
 
-            body = {
-                "model": resolved_model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            }
+        body = {
+            "model": resolved_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
 
         response = await self._client.post(endpoint, headers=headers, json=body)
 
@@ -155,16 +171,14 @@ class AIGateway:
                 "ai_gateway_error",
                 status=response.status_code,
                 error=response.text,
+                model=resolved_model,
             )
             raise RuntimeError(f"AI Gateway error: {response.status_code} - {response.text}")
 
         data = response.json()
 
-        # Extract content based on response format
-        if self._is_anthropic(model):
-            content = data.get("content", [{}])[0].get("text", "")
-        else:
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        # Extract content - OpenAI-compatible format for all providers
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
         logger.info(
             "ai_gateway_response",
