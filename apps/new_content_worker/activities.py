@@ -843,7 +843,7 @@ async def get_article_by_id(article_id: Any) -> Dict[str, Any]:
         conn = await asyncpg.connect(database_url)
         try:
             row = await conn.fetchrow(
-                "SELECT id, slug, title, app, payload, status, playback_id FROM articles WHERE id = $1",
+                "SELECT id, slug, title, app, payload, status, video_playback_id FROM articles WHERE id = $1",
                 int(article_id)
             )
 
@@ -860,7 +860,7 @@ async def get_article_by_id(article_id: Any) -> Dict[str, Any]:
                     "title": row["title"],
                     "app": row["app"],
                     "status": row["status"],
-                    "playback_id": row["playback_id"],
+                    "playback_id": row["video_playback_id"],
                     "four_act_content": payload.get("four_act_content", []),
                     "payload": payload,
                 }
