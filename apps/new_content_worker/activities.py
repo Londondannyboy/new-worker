@@ -992,14 +992,14 @@ async def generate_seedance_video(prompt: str, video_quality: str = "medium") ->
 
 @activity.defn
 async def upload_to_mux(video_url: str, article_id: str, app: str, title: Optional[str] = None) -> Dict[str, Any]:
-    """Upload video to MUX from URL.
+    """Upload video to MUX from URL using REST API directly.
 
-    Creates a MUX asset with proper metadata for dashboard visibility.
+    Creates a MUX asset with human-readable name for dashboard visibility.
     Returns playback_id, asset_id, and thumbnail URLs.
     """
     import os
-    import time
-    import mux_python
+    import asyncio
+    import httpx
 
     activity.logger.info(f"Uploading video to MUX for article: {article_id}")
 
@@ -1009,75 +1009,85 @@ async def upload_to_mux(video_url: str, article_id: str, app: str, title: Option
     if not mux_token_id or not mux_token_secret:
         return {"success": False, "playback_id": None, "asset_id": None, "error": "MUX credentials not set"}
 
+    # Build human-readable name for MUX dashboard
+    # Format: "Article Title | app:placement | id:238"
+    name_parts = []
+    if title:
+        name_parts.append(title[:100])
+    name_parts.append(f"app:{app}")
+    name_parts.append(f"id:{article_id}")
+    asset_name = " | ".join(name_parts)[:255]
+
+    activity.logger.info(f"MUX asset name: {asset_name}")
+
     try:
-        # Configure MUX client
-        configuration = mux_python.Configuration()
-        configuration.username = mux_token_id
-        configuration.password = mux_token_secret
-        client = mux_python.ApiClient(configuration)
-        assets_api = mux_python.AssetsApi(client)
+        async with httpx.AsyncClient() as client:
+            # Create asset via MUX REST API
+            create_response = await client.post(
+                "https://api.mux.com/video/v1/assets",
+                auth=(mux_token_id, mux_token_secret),
+                json={
+                    "input": [{"url": video_url}],
+                    "playback_policy": ["public"],
+                    "passthrough": asset_name,  # Shows in dashboard
+                },
+                timeout=30.0,
+            )
+            create_response.raise_for_status()
+            create_data = create_response.json()
 
-        # Build passthrough for dashboard visibility
-        passthrough_parts = []
-        if title:
-            passthrough_parts.append(title[:80])
-        passthrough_parts.append(f"app:{app}")
-        passthrough_parts.append(f"id:{article_id}")
-        passthrough = " | ".join(passthrough_parts)[:255]
+            asset_id = create_data["data"]["id"]
+            activity.logger.info(f"MUX asset created: {asset_id}")
 
-        activity.logger.info(f"MUX label: {passthrough}")
+            # Poll for asset to be ready
+            max_attempts = 60  # 2 minutes max
+            for attempt in range(max_attempts):
+                status_response = await client.get(
+                    f"https://api.mux.com/video/v1/assets/{asset_id}",
+                    auth=(mux_token_id, mux_token_secret),
+                    timeout=10.0,
+                )
+                status_response.raise_for_status()
+                status_data = status_response.json()
 
-        # Create asset from URL
-        meta_obj = {}
-        if title:
-            meta_obj["title"] = title[:100]
-        meta_obj["app"] = app
+                asset_status = status_data["data"]["status"]
+                activity.heartbeat(f"MUX: {asset_status}, attempt {attempt}")
 
-        create_asset_request = mux_python.CreateAssetRequest(
-            input=[mux_python.InputSettings(url=video_url)],
-            playback_policy=[mux_python.PlaybackPolicy.PUBLIC],
-            passthrough=passthrough,
-            meta=meta_obj if meta_obj else None
-        )
+                if asset_status == "ready":
+                    playback_ids = status_data["data"].get("playback_ids", [])
+                    if not playback_ids:
+                        return {"success": False, "playback_id": None, "asset_id": asset_id, "error": "No playback ID"}
 
-        asset = assets_api.create_asset(create_asset_request)
-        asset_id = asset.data.id
-        activity.logger.info(f"MUX asset created: {asset_id}")
+                    playback_id = playback_ids[0]["id"]
+                    duration = status_data["data"].get("duration", 12)
 
-        # Wait for asset to be ready
-        max_attempts = 60  # 2 minutes max
-        for attempt in range(max_attempts):
-            asset_status = assets_api.get_asset(asset_id)
-            activity.heartbeat(f"MUX: {asset_status.data.status}, attempt {attempt}")
+                    activity.logger.info(f"MUX ready! Playback ID: {playback_id}")
 
-            if asset_status.data.status == "ready":
-                playback_id = asset_status.data.playback_ids[0].id
-                duration = asset_status.data.duration or 12
+                    # Generate thumbnail URLs
+                    image_base = f"https://image.mux.com/{playback_id}"
+                    stream_base = f"https://stream.mux.com/{playback_id}"
 
-                activity.logger.info(f"MUX ready! Playback ID: {playback_id}")
+                    return {
+                        "success": True,
+                        "asset_id": asset_id,
+                        "playback_id": playback_id,
+                        "duration": duration,
+                        "stream_url": f"{stream_base}.m3u8",
+                        "gif_url": f"{image_base}/animated.gif?start=0&end=5&width=480&fps=15",
+                        "thumbnail_url": f"{image_base}/thumbnail.jpg?time=6&width=640",
+                        "thumbnail_hero": f"{image_base}/thumbnail.jpg?time=6&width=1920&height=1080&fit_mode=smartcrop",
+                    }
+                elif asset_status == "errored":
+                    errors = status_data["data"].get("errors", {})
+                    return {"success": False, "playback_id": None, "asset_id": asset_id, "error": f"MUX error: {errors}"}
 
-                # Generate thumbnail URLs
-                image_base = f"https://image.mux.com/{playback_id}"
-                stream_base = f"https://stream.mux.com/{playback_id}"
+                await asyncio.sleep(2)
 
-                return {
-                    "success": True,
-                    "asset_id": asset_id,
-                    "playback_id": playback_id,
-                    "duration": duration,
-                    "stream_url": f"{stream_base}.m3u8",
-                    "gif_url": f"{image_base}/animated.gif?start=0&end=5&width=480&fps=15",
-                    "thumbnail_url": f"{image_base}/thumbnail.jpg?time=6&width=640",
-                    "thumbnail_hero": f"{image_base}/thumbnail.jpg?time=6&width=1920&height=1080&fit_mode=smartcrop",
-                }
-            elif asset_status.data.status == "errored":
-                errors = asset_status.data.errors
-                return {"success": False, "playback_id": None, "asset_id": asset_id, "error": f"MUX error: {errors}"}
+            return {"success": False, "playback_id": None, "asset_id": asset_id, "error": "MUX processing timed out"}
 
-            time.sleep(2)
-
-        return {"success": False, "playback_id": None, "asset_id": asset_id, "error": "MUX processing timed out"}
-
+    except httpx.HTTPStatusError as e:
+        activity.logger.error(f"MUX HTTP error: {e.response.status_code} - {e.response.text}")
+        return {"success": False, "playback_id": None, "asset_id": None, "error": f"MUX API error: {e.response.status_code}"}
     except Exception as e:
         activity.logger.error(f"MUX error: {e}")
         return {"success": False, "playback_id": None, "asset_id": None, "error": str(e)}
