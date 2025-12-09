@@ -218,8 +218,8 @@ class CreateCompanyWorkflow:
         if logo_url:
             profile["logo_url"] = logo_url
 
-            # Generate hero image from logo
-            workflow.logger.info("Phase 6.5: Generate hero image")
+            # Generate hero image from logo (via Cloudinary)
+            workflow.logger.info("Phase 6.5: Generate hero & thumbnail images")
             hero_result = await workflow.execute_activity(
                 generate_logo_hero_image,
                 args=[
@@ -228,15 +228,13 @@ class CreateCompanyWorkflow:
                     jurisdiction,
                     category,
                 ],
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
-            if hero_result.get("success") and hero_result.get("image_url"):
-                hero_image_url = hero_result.get("image_url")
-
-                # Upload to MUX (we'll get company_id after save, so temporarily store URL)
-                profile["hero_image_url"] = hero_image_url
+            if hero_result.get("success"):
+                profile["hero_image_url"] = hero_result.get("image_url")
+                profile["thumbnail_image_url"] = hero_result.get("thumbnail_url")
 
         # TODO: Video generation if generate_video=True
         video_playback_id = None
@@ -260,25 +258,19 @@ class CreateCompanyWorkflow:
                 "domain": domain,
             }
 
-        # Upload hero image to MUX if generated
+        # Store Cloudinary image URLs if generated
         if profile.get("hero_image_url"):
-            workflow.logger.info("Phase 7.5: Upload hero image to MUX")
+            workflow.logger.info("Phase 7.5: Store hero and thumbnail image URLs")
             mux_result = await workflow.execute_activity(
                 upload_logo_to_mux,
                 args=[
                     profile.get("hero_image_url"),
+                    profile.get("thumbnail_image_url", ""),
                     company_id,
                     profile.get("legal_name", domain),
                 ],
-                start_to_close_timeout=timedelta(minutes=5),
-                retry_policy=RetryPolicy(maximum_attempts=2),
+                start_to_close_timeout=timedelta(seconds=10),
             )
-
-            if mux_result.get("success"):
-                hero_playback_id = mux_result.get("hero_playback_id")
-                thumbnail_playback_id = mux_result.get("thumbnail_playback_id")
-                profile["hero_playback_id"] = hero_playback_id
-                profile["thumbnail_playback_id"] = thumbnail_playback_id
 
         # Sync to Zep
         await workflow.execute_activity(
@@ -297,8 +289,8 @@ class CreateCompanyWorkflow:
             "domain": domain,
             "legal_name": profile.get("legal_name"),
             "logo_url": profile.get("logo_url"),
-            "hero_playback_id": hero_playback_id,
-            "thumbnail_playback_id": thumbnail_playback_id,
+            "hero_image_url": profile.get("hero_image_url"),
+            "thumbnail_image_url": profile.get("thumbnail_image_url"),
             "video_playback_id": video_playback_id,
             "cost": total_cost,
         }

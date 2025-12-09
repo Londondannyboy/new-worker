@@ -441,13 +441,16 @@ async def generate_logo_hero_image(
     category: str,
 ) -> Dict[str, Any]:
     """
-    Generate a professional hero image from company logo using Replicate.
+    Generate hero images using Cloudinary transformations.
 
-    Creates a branded hero image with:
-    - Logo positioned
-    - Company name in styled text
-    - Background themed to country/city
-    - Dimensions: 1920x1080
+    Creates two images:
+    - Hero: 1920x1080 with logo + company name overlay
+    - Thumbnail: 400x300 with same design
+
+    Uses Cloudinary's URL transformation API for:
+    - Logo overlay (white, positioned)
+    - Company name + country text overlay (soft, background)
+    - Light background (subtle, professional)
 
     Args:
         logo_url: URL to company logo image
@@ -456,95 +459,50 @@ async def generate_logo_hero_image(
         category: Company category (e.g., "private equity")
 
     Returns:
-        {success, image_url, error}
+        {success, image_url, thumbnail_url, error}
     """
     import os
-    import httpx
-    import json
-    import asyncio
+    from urllib.parse import quote
 
-    activity.logger.info(f"Generating hero image for: {company_name}")
+    activity.logger.info(f"Generating hero images for: {company_name}")
 
     try:
-        replicate_token = os.getenv("REPLICATE_API_TOKEN")
-        if not replicate_token:
-            return {"success": False, "error": "REPLICATE_API_TOKEN not set"}
+        cloudinary_cloud = os.getenv("CLOUDINARY_CLOUD_NAME")
+        if not cloudinary_cloud:
+            return {"success": False, "error": "CLOUDINARY_CLOUD_NAME not set"}
 
-        # Build prompt for image generation
-        # Map country to background theme
-        background_themes = {
-            "UK": "London skyline, Big Ben, professional British setting",
-            "USA": "New York skyline, professional American business setting",
-            "EU": "European cityscape, modern professional setting",
-            "Asia": "Asian business district, modern professional setting",
+        # Ensure logo_url is URL-safe
+        logo_url_safe = quote(logo_url, safe=':/?#[]@!$&\'()*+,;=')
+
+        # Build Cloudinary transformation for hero image (1920x1080)
+        # Layers: background + logo + text
+        hero_transform = (
+            f"w_1920,h_1080,c_fill,bg_rgb:f8f9fa"  # Light background
+            f"/l_text:Arial_80_bold_white_center:{quote(company_name)},y_-150"  # Company name
+            f"/l_text:Arial_40_white_center:{quote(country)},y_100,o_40"  # Country (soft)
+            f"/l_fetch:{logo_url_safe},w_300,g_center,c_fit"  # Logo centered
+        )
+
+        # Build Cloudinary transformation for thumbnail (400x300)
+        thumbnail_transform = (
+            f"w_400,h_300,c_fill,bg_rgb:f8f9fa"  # Light background
+            f"/l_text:Arial_24_bold_white_center:{quote(company_name)},y_-60"  # Company name
+            f"/l_text:Arial_14_white_center:{quote(country)},y_40,o_40"  # Country (soft)
+            f"/l_fetch:{logo_url_safe},w_100,g_center,c_fit"  # Logo centered
+        )
+
+        # Cloudinary fetch URLs
+        hero_url = f"https://res.cloudinary.com/{cloudinary_cloud}/image/fetch/{hero_transform}/v1/image.jpg"
+        thumbnail_url = f"https://res.cloudinary.com/{cloudinary_cloud}/image/fetch/{thumbnail_transform}/v1/image.jpg"
+
+        activity.logger.info(f"Hero image URL: {hero_url}")
+        activity.logger.info(f"Thumbnail URL: {thumbnail_url}")
+
+        return {
+            "success": True,
+            "image_url": hero_url,
+            "thumbnail_url": thumbnail_url,
         }
-
-        region = "EU" if country in ["France", "Germany", "Netherlands", "Belgium", "Spain", "Italy", "Cyprus", "Slovenia", "Greece", "Malta", "Latvia", "Sweden"] else "UK"
-        background = background_themes.get(region, "professional business cityscape")
-
-        prompt = f"""Create a professional business hero image (1920x1080):
-- Center: {company_name} company logo (incorporate logo image: {logo_url})
-- Text: "{company_name}" in elegant, bold white/black sans-serif font
-- Industry: {category}
-- Background: {background}, subtle, professional
-- Style: Modern, clean, corporate
-- Color scheme: Professional blues, grays, white
-- Lighting: Professional studio lighting
-- Quality: High resolution, 4K ready"""
-
-        # Call Replicate API
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://api.replicate.com/v1/predictions",
-                headers={"Authorization": f"Token {replicate_token}"},
-                json={
-                    "version": "ac732df83cea7fff18f51b66915e4aded0ae7e13c10395249e7d2e1b97a5efb5",  # Stable Diffusion 3
-                    "input": {"prompt": prompt, "width": 1920, "height": 1080},
-                },
-                timeout=300.0,
-            )
-
-            if not response.is_success:
-                return {"success": False, "error": f"Replicate API error: {response.status_code}"}
-
-            prediction = response.json()
-            prediction_id = prediction.get("id")
-
-            # Poll for completion
-            max_polls = 60
-            poll_interval = 2
-
-            for i in range(max_polls):
-                status_response = await client.get(
-                    f"https://api.replicate.com/v1/predictions/{prediction_id}",
-                    headers={"Authorization": f"Token {replicate_token}"},
-                    timeout=30.0,
-                )
-
-                if not status_response.is_success:
-                    return {"success": False, "error": "Failed to check prediction status"}
-
-                status_data = status_response.json()
-                status = status_data.get("status")
-
-                if status == "succeeded":
-                    output = status_data.get("output", [])
-                    if output:
-                        image_url = output[0]
-                        activity.logger.info(f"Hero image generated: {image_url}")
-                        return {"success": True, "image_url": image_url}
-                    else:
-                        return {"success": False, "error": "No output from Replicate"}
-
-                elif status == "failed":
-                    error = status_data.get("error", "Unknown error")
-                    return {"success": False, "error": f"Replicate generation failed: {error}"}
-
-                elif status == "processing":
-                    await asyncio.sleep(poll_interval)
-                    continue
-
-            return {"success": False, "error": "Generation timeout"}
 
     except Exception as e:
         activity.logger.error(f"Hero image generation failed: {str(e)}")
@@ -553,99 +511,41 @@ async def generate_logo_hero_image(
 
 @activity.defn
 async def upload_logo_to_mux(
-    image_url: str,
+    hero_image_url: str,
+    thumbnail_image_url: str,
     company_id: int,
     company_name: str,
 ) -> Dict[str, Any]:
     """
-    Upload hero image to MUX for CDN hosting.
+    Store hero and thumbnail images (Cloudinary URLs) in company profile.
 
-    Creates MUX asset for:
-    - Hero image (1920x1080)
-    - Thumbnail (400x300)
+    Since Cloudinary provides CDN URLs directly, we store them as:
+    - hero_image_url: Direct Cloudinary URL (1920x1080)
+    - thumbnail_image_url: Direct Cloudinary URL (400x300)
+
+    No need to upload to MUX since Cloudinary is already a fast CDN.
 
     Args:
-        image_url: URL to generated hero image
+        hero_image_url: Cloudinary URL for hero image (1920x1080)
+        thumbnail_image_url: Cloudinary URL for thumbnail (400x300)
         company_id: Company database ID
         company_name: Company name for metadata
 
     Returns:
-        {success, hero_playback_id, thumbnail_playback_id, asset_id, error}
+        {success, hero_image_url, thumbnail_image_url}
     """
-    import os
-    import httpx
-
-    activity.logger.info(f"Uploading logo hero image to MUX for: {company_name}")
+    activity.logger.info(f"Storing Cloudinary image URLs for: {company_name}")
 
     try:
-        mux_token_id = os.getenv("MUX_TOKEN_ID")
-        mux_token_secret = os.getenv("MUX_TOKEN_SECRET")
+        activity.logger.info(f"Hero image: {hero_image_url}")
+        activity.logger.info(f"Thumbnail: {thumbnail_image_url}")
 
-        if not (mux_token_id and mux_token_secret):
-            return {"success": False, "error": "MUX credentials not set"}
-
-        # Create asset in MUX
-        asset_name = f"Logo Hero | {company_name} | id:{company_id}"
-
-        async with httpx.AsyncClient() as client:
-            create_response = await client.post(
-                "https://api.mux.com/video/v1/assets",
-                auth=(mux_token_id, mux_token_secret),
-                json={
-                    "input": [{"url": image_url}],
-                    "playback_policy": ["public"],
-                    "passthrough": asset_name[:255],
-                },
-                timeout=30.0,
-            )
-
-            if not create_response.is_success:
-                return {"success": False, "error": f"MUX creation failed: {create_response.status_code}"}
-
-            asset_data = create_response.json()
-            asset = asset_data.get("data", {})
-            asset_id = asset.get("id")
-
-            activity.logger.info(f"MUX asset created: {asset_id}")
-
-            # Poll for ready status
-            max_polls = 60
-            poll_interval = 2
-
-            for i in range(max_polls):
-                import asyncio
-                await asyncio.sleep(poll_interval if i > 0 else 0)
-
-                status_response = await client.get(
-                    f"https://api.mux.com/video/v1/assets/{asset_id}",
-                    auth=(mux_token_id, mux_token_secret),
-                    timeout=30.0,
-                )
-
-                if not status_response.is_success:
-                    continue
-
-                status_data = status_response.json()
-                asset_status = status_data.get("data", {})
-                status = asset_status.get("status")
-
-                if status == "ready":
-                    playback_id = asset_status.get("playback_ids", [{}])[0].get("id")
-
-                    activity.logger.info(f"MUX asset ready: {playback_id}")
-                    return {
-                        "success": True,
-                        "hero_playback_id": playback_id,
-                        "thumbnail_playback_id": playback_id,  # Same playback ID for both
-                        "asset_id": asset_id,
-                    }
-
-                elif status == "errored":
-                    error_msg = asset_status.get("errors", [{}])[0].get("message", "Unknown error")
-                    return {"success": False, "error": f"MUX asset error: {error_msg}"}
-
-            return {"success": False, "error": "MUX asset timeout"}
+        return {
+            "success": True,
+            "hero_image_url": hero_image_url,
+            "thumbnail_image_url": thumbnail_image_url,
+        }
 
     except Exception as e:
-        activity.logger.error(f"MUX upload failed: {str(e)}")
+        activity.logger.error(f"Image storage failed: {str(e)}")
         return {"success": False, "error": str(e)}
