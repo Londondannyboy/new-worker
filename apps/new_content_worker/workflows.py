@@ -289,6 +289,7 @@ class CreateArticleWorkflow:
                         upload_to_mux,
                         args=[video_result.get("video_url"), article_id, app, article.get("title")],
                         start_to_close_timeout=timedelta(minutes=5),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
                     )
                     if mux_result.get("success"):
                         video_playback_id = mux_result.get("playback_id")
@@ -397,10 +398,12 @@ class CreateVideoWorkflow:
         total_cost = video_result.get("cost", 0)
 
         # Phase 4: Upload to MUX (with title for dashboard)
+        # Limited retries - Replicate URLs expire, no point retrying forever
         mux_result = await workflow.execute_activity(
             upload_to_mux,
             args=[video_url, article_id, app, title],
             start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=RetryPolicy(maximum_attempts=3),
         )
         if not mux_result.get("success"):
             return {"success": False, "error": f"MUX upload failed: {mux_result.get('error')}", "cost": total_cost}
