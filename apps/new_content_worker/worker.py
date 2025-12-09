@@ -36,6 +36,8 @@ from activities import (
     check_research_ambiguity,
     generate_company_profile,
     extract_and_process_logo,
+    generate_logo_hero_image,
+    upload_logo_to_mux,
     save_company_to_neon,
     sync_company_to_zep,
     # Article activities
@@ -114,6 +116,8 @@ async def main():
             check_research_ambiguity,
             generate_company_profile,
             extract_and_process_logo,
+            generate_logo_hero_image,
+            upload_logo_to_mux,
             save_company_to_neon,
             sync_company_to_zep,
             # Article

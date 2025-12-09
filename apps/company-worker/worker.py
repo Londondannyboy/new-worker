@@ -32,7 +32,7 @@ from src.activities import (
 )
 
 
-TASK_QUEUE = "quest-company-queue"
+TASK_QUEUE = "new-company-queue"
 
 
 async def get_temporal_client() -> Client:
