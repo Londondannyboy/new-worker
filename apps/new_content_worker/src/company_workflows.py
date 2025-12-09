@@ -20,6 +20,8 @@ from apps.company_worker.src.activities import (
     check_research_ambiguity,
     generate_company_profile,
     extract_and_process_logo,
+    generate_logo_hero_image,
+    upload_logo_to_mux,
     save_company_to_neon,
     sync_company_to_zep,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "check_research_ambiguity",
     "generate_company_profile",
     "extract_and_process_logo",
+    "generate_logo_hero_image",
+    "upload_logo_to_mux",
     "save_company_to_neon",
     "sync_company_to_zep",
 ]

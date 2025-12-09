@@ -29,6 +29,8 @@ with workflow.unsafe.imports_passed_through():
             check_research_ambiguity,
             generate_company_profile,
             extract_and_process_logo,
+            generate_logo_hero_image,
+            upload_logo_to_mux,
             save_company_to_neon,
             sync_company_to_zep,
         )
@@ -42,6 +44,8 @@ with workflow.unsafe.imports_passed_through():
             check_research_ambiguity,
             generate_company_profile,
             extract_and_process_logo,
+            generate_logo_hero_image,
+            upload_logo_to_mux,
             save_company_to_neon,
             sync_company_to_zep,
         )
@@ -199,7 +203,7 @@ class CreateCompanyWorkflow:
         workflow.logger.info(f"Profile generated: {profile.get('legal_name', domain)}")
 
         # ===== PHASE 6: MEDIA =====
-        workflow.logger.info("Phase 6: Process media (logo)")
+        workflow.logger.info("Phase 6: Process media (logo + hero image)")
 
         logo_result = await workflow.execute_activity(
             extract_and_process_logo,
@@ -208,8 +212,31 @@ class CreateCompanyWorkflow:
         )
 
         logo_url = logo_result.get("logo_url")
+        hero_playback_id = None
+        thumbnail_playback_id = None
+
         if logo_url:
             profile["logo_url"] = logo_url
+
+            # Generate hero image from logo
+            workflow.logger.info("Phase 6.5: Generate hero image")
+            hero_result = await workflow.execute_activity(
+                generate_logo_hero_image,
+                args=[
+                    logo_url,
+                    profile.get("legal_name", domain),
+                    jurisdiction,
+                    category,
+                ],
+                start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
+            if hero_result.get("success") and hero_result.get("image_url"):
+                hero_image_url = hero_result.get("image_url")
+
+                # Upload to MUX (we'll get company_id after save, so temporarily store URL)
+                profile["hero_image_url"] = hero_image_url
 
         # TODO: Video generation if generate_video=True
         video_playback_id = None
@@ -233,6 +260,26 @@ class CreateCompanyWorkflow:
                 "domain": domain,
             }
 
+        # Upload hero image to MUX if generated
+        if profile.get("hero_image_url"):
+            workflow.logger.info("Phase 7.5: Upload hero image to MUX")
+            mux_result = await workflow.execute_activity(
+                upload_logo_to_mux,
+                args=[
+                    profile.get("hero_image_url"),
+                    company_id,
+                    profile.get("legal_name", domain),
+                ],
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
+            if mux_result.get("success"):
+                hero_playback_id = mux_result.get("hero_playback_id")
+                thumbnail_playback_id = mux_result.get("thumbnail_playback_id")
+                profile["hero_playback_id"] = hero_playback_id
+                profile["thumbnail_playback_id"] = thumbnail_playback_id
+
         # Sync to Zep
         await workflow.execute_activity(
             sync_company_to_zep,
@@ -249,6 +296,9 @@ class CreateCompanyWorkflow:
             "slug": profile.get("slug"),
             "domain": domain,
             "legal_name": profile.get("legal_name"),
+            "logo_url": profile.get("logo_url"),
+            "hero_playback_id": hero_playback_id,
+            "thumbnail_playback_id": thumbnail_playback_id,
             "video_playback_id": video_playback_id,
             "cost": total_cost,
         }
